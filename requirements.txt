@@ -1,0 +1,23 @@
+# Core dependencies
+boto3>=1.34.0
+botocore>=1.34.0
+
+# LangChain and AWS integration
+langchain-aws>=0.1.0
+langchain-core>=0.2.0
+
+# MongoDB
+pymongo>=4.6.0
+
+# Strands and AgentCore (these might need to be installed separately or from specific sources)
+strands-agents
+strands-agents-tools
+bedrock-agentcore
+bedrock-agentcore-starter-toolkit
+
+# Streamlit for web interface
+streamlit>=1.28.0
+
+# Additional utilities that might be needed
+python-dotenv>=1.0.0
+requests>=2.31.0
