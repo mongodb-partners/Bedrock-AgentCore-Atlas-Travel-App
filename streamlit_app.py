@@ -21,7 +21,7 @@ def initialize_bedrock_agent_client():
     )
 
 def get_agent_response(agent_client, agent_runtime_arn, user_input):
-    """Get response from the Bedrock AgentCore."""
+    """Get response from the Bedrock AgentCore using the same logic as app.py."""
     try:
         # Prepare the payload for AgentCore
         payload = json.dumps({"prompt": user_input})
@@ -33,34 +33,22 @@ def get_agent_response(agent_client, agent_runtime_arn, user_input):
             payload=payload
         )
         
-        # Extract the response from the streaming body
-        response_body = response['response'].read().decode('utf-8')
+        # Extract response using the same method as app.py
+        raw_content = response['response'].read()
+        decoded_content = raw_content.decode('utf-8')
         
-        # Debug: Show what we're getting
-        st.write("Debug - Raw response body:", response_body[:200] + "..." if len(response_body) > 200 else response_body)
-        
-        # Try to parse as JSON first (in case it's wrapped)
+        # Parse the JSON-encoded response to get the actual text
         try:
-            response_data = json.loads(response_body)
+            agent_response = json.loads(decoded_content)
             
-            # Debug: Show parsed data type and content
-            st.write("Debug - Parsed data type:", type(response_data))
-            st.write("Debug - Parsed data:", str(response_data)[:200] + "..." if len(str(response_data)) > 200 else str(response_data))
+            # Check if we got a Starlette object string instead of actual content
+            if isinstance(agent_response, str) and "starlette.responses.JSONResponse object" in agent_response:
+                return "⚠️ I'm experiencing a technical issue with the response format. The agent is working but there's a serialization problem. Please try your question again."
             
-            # Handle the specific case where we get a Starlette object string
-            if isinstance(response_data, str) and "starlette.responses.JSONResponse object" in response_data:
-                return "I apologize, but I'm experiencing a technical issue with the response format. Please try your question again, or contact support if the issue persists."
+            return agent_response
             
-            # Use str() conversion like app.py does - this handles Starlette objects correctly
-            response_str = str(response_data)
-            
-            # If it's still a Starlette object reference, return an error message
-            if "starlette.responses.JSONResponse object" in response_str:
-                return "I apologize, but I'm experiencing a technical issue with the response format. Please try your question again."
-            
-            return response_str
         except json.JSONDecodeError:
-            return response_body
+            return decoded_content
             
     except Exception as e:
         st.error(f"Error invoking AgentCore: {str(e)}")
