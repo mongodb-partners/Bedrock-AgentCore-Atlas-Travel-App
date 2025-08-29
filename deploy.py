@@ -1,216 +1,55 @@
-import boto3
-import json
+#!/usr/bin/env python
+
+"""
+A script to deploy an Amazon Bedrock Agent Core runtime.
+
+This script provides functionality to deploy and configure an Amazon Bedrock Agent Core runtime
+with specified agent name and entry point. It handles the deployment process including:
+- Configuring the runtime with required parameters
+- Creating execution roles and ECR repositories automatically 
+- Launching the runtime
+- Monitoring deployment status
+
+The code is built on the Amazon Bedrock Agent Core Starter Toolkit and requires valid AWS credentials.
+
+Dependencies:
+- bedrock_agentcore_starter_toolkit
+- boto3
+
+Usage:
+uv run deploy_to_agentcore.py --agent_name <name> --entry_point <file>
+
+This code has been adapted from:
+https://github.com/awslabs/amazon-bedrock-agentcore-samples/blob/main/01-tutorials/01-AgentCore-runtime/01-hosting-agent/01-strands-with-bedrock-model/runtime_with_strands_and_bedrock_models.ipynb
+"""
+
+import argparse
+import os
 import time
-from boto3.session import Session
+
 from bedrock_agentcore_starter_toolkit import Runtime
 from boto3.session import Session
 
 boto_session = Session()
-region = boto_session.region_name
+region = os.getenv('AWS_REGION', 'us-west-2')
 
+agentcore_runtime = Runtime()
 
-def create_agentcore_role(agent_name):
-    iam_client = boto3.client('iam')
-    agentcore_role_name = f'agentcore-{agent_name}-role'
-    boto_session = Session()
-    region = boto_session.region_name
-    account_id = boto3.client("sts").get_caller_identity()["Account"]
-    role_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Sid": "BedrockPermissions",
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream"
-                ],
-                "Resource": "*"
-            },
-            {
-                "Sid": "ECRImageAccess",
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:BatchGetImage",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:GetAuthorizationToken",
-                    "ecr:BatchGetImage",
-                    "ecr:GetDownloadUrlForLayer"
-                ],
-                "Resource": [
-                    f"arn:aws:ecr:{region}:{account_id}:repository/*"
-                ]
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "logs:DescribeLogStreams",
-                    "logs:CreateLogGroup"
-                ],
-                "Resource": [
-                    f"arn:aws:logs:{region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*"
-                ]
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "logs:DescribeLogGroups"
-                ],
-                "Resource": [
-                    f"arn:aws:logs:{region}:{account_id}:log-group:*"
-                ]
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "logs:CreateLogStream",
-                    "logs:PutLogEvents"
-                ],
-                "Resource": [
-                    f"arn:aws:logs:{region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
-                ]
-            },
-            {
-                "Sid": "ECRTokenAccess",
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:GetAuthorizationToken"
-                ],
-                "Resource": "*"
-            },
-            {
-            "Effect": "Allow",
-            "Action": [
-                "xray:PutTraceSegments",
-                "xray:PutTelemetryRecords",
-                "xray:GetSamplingRules",
-                "xray:GetSamplingTargets"
-                ],
-             "Resource": [ "*" ]
-             },
-             {
-                "Effect": "Allow",
-                "Resource": "*",
-                "Action": "cloudwatch:PutMetricData",
-                "Condition": {
-                    "StringEquals": {
-                        "cloudwatch:namespace": "bedrock-agentcore"
-                    }
-                }
-            },
-            {
-                "Sid": "GetAgentAccessToken",
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock-agentcore:GetWorkloadAccessToken",
-                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
-                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId"
-                ],
-                "Resource": [
-                  f"arn:aws:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default",
-                  f"arn:aws:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default/workload-identity/{agent_name}-*"
-                ]
-            },
-            {
-                "Sid": "SecretsManagerAccess",
-                "Effect": "Allow",
-                "Action": [
-                    "secretsmanager:GetSecretValue"
-                ],
-                "Resource": [
-                    f"arn:aws:secretsmanager:{region}:{account_id}:secret:workshop/atlas_secret*"
-                ]
-            }
-        ]
-    }
-    assume_role_policy_document = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Sid": "AssumeRolePolicy",
-                "Effect": "Allow",
-                "Principal": {
-                    "Service": "bedrock-agentcore.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole",
-                "Condition": {
-                    "StringEquals": {
-                        "aws:SourceAccount": f"{account_id}"
-                    },
-                    "ArnLike": {
-                        "aws:SourceArn": f"arn:aws:bedrock-agentcore:{region}:{account_id}:*"
-                    }
-                }
-            }
-        ]
-    }
-
-    assume_role_policy_document_json = json.dumps(
-        assume_role_policy_document
-    )
-    role_policy_document = json.dumps(role_policy)
-    # Create IAM Role for the Lambda function
-    try:
-        agentcore_iam_role = iam_client.create_role(
-            RoleName=agentcore_role_name,
-            AssumeRolePolicyDocument=assume_role_policy_document_json
-        )
-
-        # Pause to make sure role is created
-        time.sleep(10)
-    except iam_client.exceptions.EntityAlreadyExistsException:
-        print("Role already exists -- deleting and creating it again")
-        policies = iam_client.list_role_policies(
-            RoleName=agentcore_role_name,
-            MaxItems=100
-        )
-        print("policies:", policies)
-        for policy_name in policies['PolicyNames']:
-            iam_client.delete_role_policy(
-                RoleName=agentcore_role_name,
-                PolicyName=policy_name
-            )
-        print(f"deleting {agentcore_role_name}")
-        iam_client.delete_role(
-            RoleName=agentcore_role_name
-        )
-        print(f"recreating {agentcore_role_name}")
-        agentcore_iam_role = iam_client.create_role(
-            RoleName=agentcore_role_name,
-            AssumeRolePolicyDocument=assume_role_policy_document_json
-        )
-
-    # Attach the AWSLambdaBasicExecutionRole policy
-    print(f"attaching role policy {agentcore_role_name}")
-    try:
-        iam_client.put_role_policy(
-            PolicyDocument=role_policy_document,
-            PolicyName="AgentCorePolicy",
-            RoleName=agentcore_role_name
-        )
-    except Exception as e:
-        print(e)
-
-    return agentcore_iam_role
-
-if __name__ == "__main__":
-    agent_name="agentcore_strands"
-    agentcore_iam_role = create_agentcore_role(agent_name=agent_name)
-    print(str(agentcore_iam_role))
+def wait_for_status():
+    """
+    Wait for the AgentCore runtime deployment to reach a terminal status.
     
-    agentcore_runtime = Runtime()
+    Polls the runtime status every 10 seconds until one of the following statuses is reached:
+    - READY: Deployment completed successfully
+    - CREATE_FAILED: Deployment creation failed
+    - DELETE_FAILED: Deployment deletion failed  
+    - UPDATE_FAILED: Deployment update failed
     
-    response = agentcore_runtime.configure(
-        entrypoint="agent.py",
-        execution_role=agentcore_iam_role['Role']['Arn'],
-        auto_create_ecr=True,
-        requirements_file="requirements.txt",
-        region=region,
-        agent_name=agent_name
-    )
-    print(str(response))
-    print("Launching...")
-    launch_result = agentcore_runtime.launch()
+    Prints the current status at each poll interval.
+    
+    Returns:
+        None
+    """
     status_response = agentcore_runtime.status()
     status = status_response.endpoint['status']
     end_status = ['READY', 'CREATE_FAILED', 'DELETE_FAILED', 'UPDATE_FAILED']
@@ -220,5 +59,104 @@ if __name__ == "__main__":
         status = status_response.endpoint['status']
         print(status)
 
-    invoke_response = agentcore_runtime.invoke({"prompt": "What places can I visit in India?"})
-    print(str(invoke_response))
+def deploy_agentcore(agent_name: str, entry_point: str, requirements_file: str = 'requirements.txt', local_build: bool = False):
+    """
+    Deploy an Amazon Bedrock Agent Core runtime with the specified configuration.
+
+    Args:
+        agent_name (str): Name of the agent to deploy
+        entry_point (str): Path to the entry point file for the agent
+        requirements_file (str, optional): Path to requirements.txt file. Defaults to 'requirements.txt'
+        local_build (bool, optional): Whether to build the container locally. Defaults to False
+
+    Returns:
+        Tuple[dict, Runtime]: Tuple containing:
+            - Launch result containing deployment status and endpoint information
+            - AgentCore runtime instance
+
+    Raises:
+        RuntimeError: If configuration or launch fails
+        ValueError: If required parameters are invalid
+
+    Example:
+        result, runtime = deploy_agentcore(
+            agent_name="my-agent",
+            entry_point="agent.py"
+        )
+    """
+    response = agentcore_runtime.configure(
+        entrypoint=entry_point,
+        auto_create_execution_role=True,
+        auto_create_ecr=True,
+        requirements_file=requirements_file,
+        region=region,
+        agent_name=agent_name
+    )
+    launch_result = agentcore_runtime.launch(
+        local_build=local_build
+    )
+    return launch_result, agentcore_runtime
+
+
+def deploy_agentcore_with_cognito_jwt(agent_name: str, entry_point: str, discovery_url: str, client_id: str, requirements_file: str = 'requirements.txt', local_build: bool = False):
+    """
+    Deploy an Amazon Bedrock Agent Core runtime with Cognito JWT authorization configuration.
+
+    Args:
+        agent_name (str): Name of the agent to deploy
+        entry_point (str): Path to the entry point file for the agent
+        discovery_url (str): Cognito user pool discovery URL for JWT validation
+        client_id (str): Cognito app client ID to allow access
+        requirements_file (str, optional): Path to requirements.txt file. Defaults to 'requirements.txt'
+        local_build (bool, optional): Whether to build the container locally. Defaults to False
+
+    Returns:
+        Tuple[dict, Runtime]: Tuple containing:
+            - Launch result containing deployment status and endpoint information
+            - AgentCore runtime instance
+
+    Raises:
+        RuntimeError: If configuration or launch fails
+        ValueError: If required parameters are invalid
+
+    Example:
+        result, runtime = deploy_agentcore_with_cognito_jwt(
+            agent_name="my-agent",
+            entry_point="agent.py",
+            discovery_url="https://cognito-idp.region.amazonaws.com/userpool/.well-known/openid-configuration",
+            client_id="abc123def456"
+        )
+    """
+    response = agentcore_runtime.configure(
+        entrypoint=entry_point,
+        auto_create_execution_role=True,
+        auto_create_ecr=True,
+        requirements_file=requirements_file,
+        region=region,
+        agent_name=agent_name,
+        authorizer_configuration={
+            "customJWTAuthorizer": {
+                "discoveryUrl": discovery_url,
+                "allowedClients": [client_id]
+            }
+        }
+    )
+    launch_result = agentcore_runtime.launch(
+        local_build=local_build
+    )
+    return launch_result, agentcore_runtime
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--agent_name', type=str, help='Name of the agent to deploy')
+    parser.add_argument('--entry_point', type=str, help='Entry point file for the agent')
+    parser.add_argument('--local_build', action='store_true', help='Use local build (only for arm64 platforms)')
+    args = parser.parse_args()
+
+    deploy_agentcore(
+        agent_name = args.agent_name,
+        entry_point = args.entry_point,
+        local_build = args.local_build
+    )
+    wait_for_status()
