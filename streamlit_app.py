@@ -1,6 +1,6 @@
 import streamlit as st
-import boto3
 import json
+from invoke import agentcore_client, agentcore_control_client, get_agent_runtimes, invoke_agent_runtime, region
 
 # Set page configuration
 st.set_page_config(
@@ -13,42 +13,29 @@ st.set_page_config(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-def initialize_bedrock_agent_client():
-    """Initialize the Bedrock AgentCore client."""
-    return boto3.client(
-        service_name="bedrock-agentcore",
-        region_name="us-east-1"
-    )
+# Initialize session state for agent runtimes if it doesn't exist
+if "agent_runtimes" not in st.session_state:
+    st.session_state.agent_runtimes = []
 
-def get_agent_response(agent_client, agent_runtime_arn, user_input):
-    """Get response from the Bedrock AgentCore using the same logic as app.py."""
+@st.cache_data
+def load_agent_runtimes():
+    """Load available agent runtimes using invoke.py function."""
+    try:
+        return get_agent_runtimes()
+    except Exception as e:
+        st.error(f"Error loading agent runtimes: {str(e)}")
+        return []
+
+def get_agent_response(agent_runtime_arn, user_input):
+    """Get response from the Bedrock AgentCore using invoke.py function."""
     try:
         # Prepare the payload for AgentCore
         payload = json.dumps({"prompt": user_input})
         
-        # Invoke the AgentCore runtime
-        response = agent_client.invoke_agent_runtime(
-            agentRuntimeArn=agent_runtime_arn,
-            qualifier="DEFAULT",
-            payload=payload
-        )
+        # Use the invoke_agent_runtime function from invoke.py
+        response = invoke_agent_runtime(agent_runtime_arn, payload)
         
-        # Extract response using the same method as app.py
-        raw_content = response['response'].read()
-        decoded_content = raw_content.decode('utf-8')
-        
-        # Parse the JSON-encoded response to get the actual text
-        try:
-            agent_response = json.loads(decoded_content)
-            
-            # Check if we got a Starlette object string instead of actual content
-            if isinstance(agent_response, str) and "starlette.responses.JSONResponse object" in agent_response:
-                return "⚠️ I'm experiencing a technical issue with the response format. The agent is working but there's a serialization problem. Please try your question again."
-            
-            return agent_response
-            
-        except json.JSONDecodeError:
-            return decoded_content
+        return response
             
     except Exception as e:
         st.error(f"Error invoking AgentCore: {str(e)}")
@@ -58,22 +45,72 @@ def get_agent_response(agent_client, agent_runtime_arn, user_input):
 def main():
     # App header
     st.title("🌍 MongoDB Atlas Travel Assistant")
-    st.markdown("""
+    st.markdown(f"""
     Ask questions about travel destinations, best times to visit, and more!
+    
+    **Region:** {region}
     """)
+    
+    # Load agent runtimes
+    if not st.session_state.agent_runtimes:
+        with st.spinner("Loading available agent runtimes..."):
+            st.session_state.agent_runtimes = load_agent_runtimes()
     
     # Sidebar for configuration
     with st.sidebar:
         st.header("Configuration")
-        agent_runtime_arn = st.text_input(
-            "Agent Runtime ARN", 
-            value="<AGENT-ARN>"
-        )
+        
+        # Agent runtime selection
+        if st.session_state.agent_runtimes:
+            # Create options for the selectbox
+            runtime_options = []
+            runtime_arns = []
+            
+            for runtime in st.session_state.agent_runtimes:
+                runtime_name = runtime.get('agentRuntimeName', 'Unknown')
+                runtime_arn = runtime.get('agentRuntimeArn', '')
+                runtime_options.append(f"{runtime_name}")
+                runtime_arns.append(runtime_arn)
+            
+            if runtime_options:
+                selected_index = st.selectbox(
+                    "Select Agent Runtime:",
+                    range(len(runtime_options)),
+                    format_func=lambda x: runtime_options[x],
+                    help="Choose from available agent runtimes"
+                )
+                agent_runtime_arn = runtime_arns[selected_index]
+                
+                # Display selected ARN for reference
+                st.text_area(
+                    "Selected ARN:",
+                    value=agent_runtime_arn,
+                    height=100,
+                    disabled=True,
+                    help="This is the ARN of the selected agent runtime"
+                )
+            else:
+                st.error("No agent runtimes found")
+                agent_runtime_arn = None
+        else:
+            st.error("Failed to load agent runtimes")
+            agent_runtime_arn = None
+        
+        # Refresh runtimes button
+        if st.button("🔄 Refresh Agent Runtimes"):
+            st.session_state.agent_runtimes = []
+            st.cache_data.clear()
+            st.rerun()
         
         # Add a clear chat button
-        if st.button("Clear Chat"):
+        if st.button("🗑️ Clear Chat"):
             st.session_state.messages = []
             st.rerun()
+    
+    # Check if we have a valid agent runtime ARN
+    if not agent_runtime_arn:
+        st.warning("⚠️ Please select an agent runtime from the sidebar to start chatting.")
+        return
     
     # Display chat messages
     for message in st.session_state.messages:
@@ -92,14 +129,12 @@ def main():
         # Display assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # Initialize Bedrock agent client
-                agent_client = initialize_bedrock_agent_client()
+                # Get response from Bedrock agent using invoke.py function
+                response = get_agent_response(agent_runtime_arn, prompt)
                 
-                # Get response from Bedrock agent
-                response = get_agent_response(agent_client, agent_runtime_arn, prompt)
-                
-                # Display the response
-                st.write(response)
+                # Display the response (replace literal \n with actual newlines)
+                formatted_response = response.replace('\\n\\n', '\n\n').replace('\\n', '\n')
+                st.write(formatted_response)
         
         # Add assistant response to chat history
         st.session_state.messages.append({"role": "assistant", "content": response})
