@@ -68,14 +68,23 @@ mdb_strands_agentcore/
 
 ### Direct API Testing
 
-Test the agent directly using the command-line interface:
+Test the agent directly using the command-line interface. The script will route the sample payload through the same entrypoint exposed to Bedrock AgentCore.
 
 ```bash
 source venv/bin/activate
 python app.py
 ```
 
-This will run a test query and display the agent's response with debug information.
+### Local AgentCore Runtime
+
+Run the AgentCore app locally when you want to develop or test without deploying to Bedrock:
+
+```bash
+source venv/bin/activate
+python agent.py
+```
+
+The server binds to `http://127.0.0.1:8080/invocations` and supports the same payload schema as the managed runtime. Keep this process running while you test Streamlit or other clients.
 
 ### Streamlit Web Interface
 
@@ -86,20 +95,65 @@ source venv/bin/activate
 streamlit run streamlit_app.py
 ```
 
+- If the **Agent Runtime ARN** field is empty or left as `<AGENT-ARN>`, Streamlit will post requests to the local AgentCore server (`agent.py`).
+- Populate the field with a real ARN to call the managed Bedrock AgentCore runtime instead.
+
 Navigate to `http://localhost:8501` to interact with the travel assistant through a user-friendly web interface.
+
+### Build and Push Container
+
+Use the included `Dockerfile` to package the runtime for Bedrock AgentCore deployments. Substitute your AWS account details and preferred repository name/tag.
+
+```bash
+export AWS_REGION=us-east-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ECR_REPO=bedrock-agentcore-atlas
+export IMAGE_TAG=latest
+
+# Create the repository if it does not exist
+aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" \
+  || aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
+
+# Build and push the image
+docker build -t "$ECR_REPO:$IMAGE_TAG" .
+docker tag "$ECR_REPO:$IMAGE_TAG" "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG"
+aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin \
+  "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+docker push "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG"
+
+# Use this URI for AGENTCORE_IMAGE_URI when running deploy.py
+export AGENTCORE_IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG"
+```
 
 ## Configuration
 
-**Important**: Replace `<AGENT-ARN>` in the code with your actual Bedrock AgentCore ARN.
+### Memory Configuration
 
-After running `python deploy.py`, use the ARN from the output in:
-- `app.py`: Update the `agentRuntimeArn` parameter
-- `streamlit_app.py`: Update the agent ARN reference
+Short-term memory is optional but recommended. Export these environment variables before starting the agent to enable it:
+
+- `MEMORY_ID` – the memory resource ID returned by the AgentCore Memory service (`exampleMemory-abc123defg`).
+- `MEMORY_NAMESPACE` – namespace template for your memories (default: `/travel/{sessionId}`). `{sessionId}` and `{actorId}` placeholders are resolved at runtime.
+- `MEMORY_TOP_K` – number of records to fetch per turn (default: `5`).
+- `MEMORY_PROMPT_PREFIX` – optional string prepended before retrieved snippets.
 
 Example:
-```python
-agentRuntimeArn="arn:aws:bedrock-agentcore:us-east-1:123456789:runtime/agentcore_name-id"
+
+```bash
+export MEMORY_ID="travelMemory-0a1b2c3d4e"
+export MEMORY_NAMESPACE="/travel/{sessionId}"
+export MEMORY_TOP_K=5
 ```
+
+If `MEMORY_ID` is unset or invalid, the agent runs without persistence.
+
+### Remote Agent Runtime
+
+When using the managed Bedrock runtime, provide the ARN in clients that call it:
+
+- `app.py`: set the `agentRuntimeArn` argument.
+- `streamlit_app.py`: paste the ARN into the sidebar input.
+
+Example ARN: `arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent-abc123defg`.
 
 ## Deployment
 
@@ -171,10 +225,6 @@ User Interface ← Response Processing ← Agent Response ← Travel Data/Fallba
 3. Make your changes
 4. Test thoroughly using both interfaces
 5. Submit a pull request
-
-## License
-
-[Add your license information here]
 
 ## Support
 
