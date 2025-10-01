@@ -1,6 +1,10 @@
 import time
 import logging
+import os
+import re
 import boto3
+
+from typing import Optional
 
 from pymongo import MongoClient
 from langchain_aws.embeddings import BedrockEmbeddings
@@ -8,11 +12,48 @@ from botocore.exceptions import ClientError
 from strands import Agent, tool
 from strands.models import BedrockModel
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore.memory import MemoryClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = BedrockAgentCoreApp()
+
+# Memory configuration for Bedrock AgentCore Memory service
+MEMORY_ID = os.getenv("MEMORY_ID")
+MEMORY_NAMESPACE_TEMPLATE = os.getenv("MEMORY_NAMESPACE", "/travel/{sessionId}")
+MEMORY_TOP_K = int(os.getenv("MEMORY_TOP_K", "5"))
+MEMORY_PROMPT_PREFIX = os.getenv(
+    "MEMORY_PROMPT_PREFIX",
+    "Here are details from our recent conversation that may help:\n",
+)
+
+
+def _is_valid_memory_id(value: Optional[str]) -> bool:
+    """Return True when the provided memory identifier matches AgentCore format."""
+    if not value:
+        return False
+    pattern = re.compile(r"[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}$")
+    return bool(pattern.fullmatch(value))
+
+
+if MEMORY_ID and not _is_valid_memory_id(MEMORY_ID):
+    logger.warning(
+        "Provided MEMORY_ID (%s) does not match the expected format. Short-term memory is disabled until a valid ID is configured.",
+        MEMORY_ID,
+    )
+    MEMORY_ID = None
+
+memory_client: Optional[MemoryClient] = None
+if MEMORY_ID:
+    try:
+        memory_client = MemoryClient()
+        logger.info("Initialized Bedrock AgentCore Memory client")
+    except Exception as memory_init_error:
+        logger.warning(
+            "Unable to initialize Bedrock AgentCore Memory client: %s", memory_init_error
+        )
+        memory_client = None
 
 @tool
 def current_time() -> int:
@@ -194,6 +235,125 @@ def mongodb_search(query: str) -> str:
 
     return llm_input_text
 
+
+def _format_memory_namespace(session_id: Optional[str], actor_id: Optional[str]) -> Optional[str]:
+    """Resolve the namespace pattern used by AgentCore Memory."""
+    if not session_id:
+        return None
+
+    resolved_actor = actor_id or session_id or "default"
+    try:
+        return MEMORY_NAMESPACE_TEMPLATE.format(sessionId=session_id, actorId=resolved_actor)
+    except Exception as namespace_error:
+        logger.warning("Failed to format memory namespace: %s", namespace_error)
+        return None
+
+
+def _retrieve_memory_context(namespace: Optional[str], query: str, session_id: Optional[str], actor_id: Optional[str]) -> list[str]:
+    """Fetch relevant memory snippets for the current turn."""
+    if not (memory_client and MEMORY_ID and namespace):
+        return []
+
+    try:
+        records = memory_client.retrieve_memories(
+            memory_id=MEMORY_ID,
+            namespace=namespace,
+            query=query,
+            actor_id=actor_id,
+            top_k=MEMORY_TOP_K,
+        )
+        snippets: list[str] = []
+        for record in records:
+            content = record.get("content", {})
+            text = content.get("text") if isinstance(content, dict) else None
+            if text:
+                snippets.append(text)
+
+        if snippets:
+            logger.info(
+                "Retrieved %d memory records for session_id=%s namespace=%s",
+                len(snippets),
+                session_id,
+                namespace,
+            )
+        return snippets
+    except Exception as retrieval_error:
+        logger.warning(
+            "Failed to retrieve memories for session_id=%s namespace=%s: %s",
+            session_id,
+            namespace,
+            retrieval_error,
+        )
+        return []
+
+
+def _persist_memory_turn(
+    namespace: Optional[str],
+    session_id: Optional[str],
+    actor_id: Optional[str],
+    user_prompt: str,
+    assistant_reply: Optional[str],
+) -> None:
+    """Store the latest conversation turn using AgentCore Memory."""
+    if not (memory_client and MEMORY_ID and namespace and session_id and assistant_reply):
+        return
+
+    resolved_actor = actor_id or session_id or "default"
+    try:
+        memory_client.create_event(
+            memory_id=MEMORY_ID,
+            actor_id=resolved_actor,
+            session_id=session_id,
+            messages=[
+                (user_prompt, "USER"),
+                (assistant_reply, "ASSISTANT"),
+            ],
+        )
+        logger.info(
+            "Persisted conversation turn to AgentCore Memory for session_id=%s namespace=%s",
+            session_id,
+            namespace,
+        )
+    except Exception as persistence_error:
+        logger.warning(
+            "Failed to persist conversation turn for session_id=%s namespace=%s: %s",
+            session_id,
+            namespace,
+            persistence_error,
+        )
+
+
+def _extract_agent_response(response) -> str:
+    """Normalize agent responses across different return types."""
+    try:
+        if hasattr(response, "message") and response.message:
+            return response.message["content"][0]["text"]
+        if hasattr(response, "content"):
+            return response.content
+        if hasattr(response, "text"):
+            return response.text
+        if hasattr(response, "body"):
+            body = response.body
+            return body.decode("utf-8") if isinstance(body, bytes) else str(body)
+        if "starlette" in str(type(response)):
+            if hasattr(response, "_body"):
+                body = response._body
+                return body.decode("utf-8") if isinstance(body, bytes) else str(body)
+            if hasattr(response, "content"):
+                return response.content
+
+        result = str(response)
+        if "starlette.responses.JSONResponse object" in result:
+            logger.error("Failed to extract content from Starlette response: %s", result)
+            return "I apologize, but I'm experiencing a technical issue with the response format. Please try again."
+        return result
+    except Exception as extraction_error:
+        logger.error("Error extracting response: %s", extraction_error)
+        result = str(response)
+        if "starlette.responses.JSONResponse object" in result:
+            return "I apologize, but I'm experiencing a technical issue with the response format. Please try again."
+        return result
+
 def get_secret(secret_name):
     """
     Retrieve secret from AWS Secrets Manager
@@ -234,7 +394,7 @@ agent = Agent(
 )
 
 @app.entrypoint
-def run_agent(user_input) -> str:
+def run_agent(user_input, context=None) -> str:
     """Run the agent with user input and return response"""
     # Extract the actual prompt from the input
     if isinstance(user_input, dict) and 'prompt' in user_input:
@@ -243,56 +403,32 @@ def run_agent(user_input) -> str:
         prompt = user_input
     else:
         prompt = str(user_input)
-    
-    logger.info(f"Processing user input: {prompt}")
-    response = agent(prompt)
-    
-    # Handle different response types
-    try:
-        # Try to get the content from message structure
-        if hasattr(response, 'message') and response.message:
-            return response.message['content'][0]['text']
-        # Try to get content attribute
-        elif hasattr(response, 'content'):
-            return response.content
-        # Try to get text attribute
-        elif hasattr(response, 'text'):
-            return response.text
-        # Handle Starlette JSONResponse objects specifically
-        elif hasattr(response, 'body'):
-            if isinstance(response.body, bytes):
-                return response.body.decode('utf-8')
-            else:
-                return str(response.body)
-        # Check if it's a Starlette JSONResponse and try to get the body
-        elif str(type(response)).find('starlette') != -1:
-            # For Starlette responses, try to access the body directly
-            if hasattr(response, '_body'):
-                body = response._body
-                if isinstance(body, bytes):
-                    return body.decode('utf-8')
-                else:
-                    return str(body)
-            # If no _body, try other Starlette-specific attributes
-            elif hasattr(response, 'content'):
-                return response.content
-            else:
-                logger.warning(f"Starlette response detected but couldn't extract content: {type(response)}")
-                return "I apologize, but I'm experiencing a technical issue with the response format. Please try again."
-        # Fallback to string conversion
-        else:
-            result = str(response)
-            # If we get a Starlette object string, return an error message
-            if "starlette.responses.JSONResponse object" in result:
-                logger.error(f"Failed to extract content from Starlette response: {result}")
-                return "I apologize, but I'm experiencing a technical issue with the response format. Please try again."
-            return result
-    except Exception as e:
-        logger.error(f"Error extracting response: {e}")
-        result = str(response)
-        if "starlette.responses.JSONResponse object" in result:
-            return "I apologize, but I'm experiencing a technical issue with the response format. Please try again."
-        return result
+
+    session_id = getattr(context, "session_id", None) if context else None
+    actor_id = None
+    if isinstance(user_input, dict):
+        actor_id = user_input.get("actorId")
+        session_id = session_id or user_input.get("sessionId") or user_input.get("runtimeSessionId")
+
+    logger.info("Processing user input: %s", prompt)
+
+    namespace = _format_memory_namespace(session_id, actor_id)
+    memory_snippets: list[str] = []
+    if namespace:
+        memory_snippets = _retrieve_memory_context(namespace, prompt, session_id, actor_id)
+
+    composed_prompt = prompt
+    if memory_snippets:
+        memory_block = "\n".join(memory_snippets)
+        composed_prompt = f"{MEMORY_PROMPT_PREFIX}{memory_block}\n\nUser: {prompt}"
+
+    response = agent(composed_prompt)
+
+    assistant_reply = _extract_agent_response(response)
+
+    _persist_memory_turn(namespace, session_id, actor_id, prompt, assistant_reply)
+
+    return assistant_reply
 
 if __name__ == "__main__":  
     app.run()
