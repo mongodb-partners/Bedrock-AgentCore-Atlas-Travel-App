@@ -246,7 +246,7 @@ def get_mongo_client():
 bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
 model = BedrockModel(
     client=bedrock_client,
-    model_id="anthropic.claude-3-5-sonnet-20240620-v1:0"
+    model_id="us.amazon.nova-pro-v1:0"
 )
 agent = Agent(
     model=model,
