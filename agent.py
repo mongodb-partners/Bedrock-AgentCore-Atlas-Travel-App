@@ -1,6 +1,8 @@
 import time
 import logging
 import boto3
+import certifi
+import dns.resolver
 
 from pymongo import MongoClient
 from langchain_aws.embeddings import BedrockEmbeddings
@@ -8,6 +10,9 @@ from botocore.exceptions import ClientError
 from strands import Agent, tool
 from strands.models import BedrockModel
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+
+dns.resolver.default_resolver=dns.resolver.Resolver(configure=False)
+dns.resolver.default_resolver.nameservers=['169.254.169.253', '8.8.8.8']
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -234,7 +239,7 @@ def get_mongo_client():
     try:
         mongodb_uri = get_secret("workshop/atlas_secret")  # Replace with your secret name
         logger.info("Creating MongoDB client connection")
-        client = MongoClient(mongodb_uri)
+        client = MongoClient(mongodb_uri, tlsCAFile=certifi.where())
         logger.info("Successfully connected to MongoDB")
         return client
     except Exception as e:

@@ -1,8 +1,14 @@
 import csv
 import logging
+import certifi
+import dns.resolver
+
 from pymongo import MongoClient
 import boto3
 from botocore.exceptions import ClientError
+
+dns.resolver.default_resolver=dns.resolver.Resolver(configure=False)
+dns.resolver.default_resolver.nameservers=['169.254.169.253', '8.8.8.8']
 
 # Configure logging
 logging.basicConfig(
@@ -37,7 +43,7 @@ mongodb_uri = get_secret("workshop/atlas_secret")  # Replace with your secret na
 
 # MongoDB connection
 logger.info("Connecting to MongoDB Atlas")
-client = MongoClient(mongodb_uri)
+client = MongoClient(mongodb_uri, tlsCAFile=certifi.where())
 
 db = client['travel']
 collection = db['asia']
